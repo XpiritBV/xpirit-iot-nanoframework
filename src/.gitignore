@@ -1,0 +1,6 @@
+#exclude files and folders
+*.dll
+*.obj
+**/packages
+**/bin
+**/obj
