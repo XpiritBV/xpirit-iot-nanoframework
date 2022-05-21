@@ -2,7 +2,10 @@ using nanoFramework.Azure.Devices.Client;
 using nanoFramework.Azure.Devices.Provisioning.Client;
 using nanoFramework.Azure.Devices.Shared;
 using nanoFramework.Networking;
+using System;
 using System.Diagnostics;
+using System.IO;
+using System.Net.Http;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 
@@ -20,6 +23,11 @@ namespace NF_AzureIoTDeviceTwin
         private static readonly string _deviceRegistrationId = "aca-esp-sk01";
         private static readonly string _deviceKey = "DEVICE KEY";
 
+        const string RootPath = "I:\\";
+        static DeviceClient device;
+        static int version = -1;
+        static string[] files;
+        static HttpClient httpClient = new HttpClient();
 
         public static void Main()
         {
@@ -27,6 +35,8 @@ namespace NF_AzureIoTDeviceTwin
 
             if (WiFiNetworkHelper.ConnectDhcp(_ssid, _wifiPassword))
             {
+                DownloadFirmware("https://xpiritiotnanoframeworksa.blob.core.windows.net/firmware/NF_AzureIoT.pe", "NF_AzureIoT.pe");
+
                 Debug.WriteLine("Connect to Azure IoT hub using DPS.");
 
                 X509Certificate azureCert = new X509Certificate(AzureRootCA);
@@ -38,7 +48,7 @@ namespace NF_AzureIoTDeviceTwin
                 {
 
                     // Connect to IoT hub and start using it
-                    var device = new DeviceClient(myDevice.AssignedHub, myDevice.DeviceId, _deviceKey,
+                    device = new DeviceClient(myDevice.AssignedHub, myDevice.DeviceId, _deviceKey,
                                                   nanoFramework.M2Mqtt.Messages.MqttQoSLevel.AtMostOnce, azureCert);
 
                     if (device.Open())
@@ -54,11 +64,10 @@ namespace NF_AzureIoTDeviceTwin
                         UpdateProperty(deviceTwin.Properties.Reported, "someProperty", "new value from device");
                         bool result = device.UpdateReportedProperties(deviceTwin.Properties.Reported);
                     }
-
                 }
                 else
                 {
-                    Debug.WriteLine($"Device could not be registered. Statuscode: {myDevice.Status}.{myDevice.Substatus}");
+                    Debug.WriteLine($"Device could not be registered. Statuscode: {myDevice.Status}.{myDevice.Substatus} - {myDevice.ErrorMessage}");
                 }
             }
             Thread.Sleep(Timeout.Infinite);
@@ -81,9 +90,72 @@ namespace NF_AzureIoTDeviceTwin
 
         private static void Device_TwinUpated(object sender, TwinUpdateEventArgs e)
         {
+            ProcessTwinAndDownloadFiles(e.Twin);
             Debug.WriteLine($"Changed Device Twin From Event (json):\r\n{e.Twin.ToJson()}");
         }
 
+
+        static void ProcessTwinAndDownloadFiles(TwinCollection desired)
+        {
+            int codeVersion = 0;
+            codeVersion = (int)desired["CodeVersion"];
+            string[] files;
+            TwinCollection reported = new TwinCollection();
+
+            // If the version is the same as the stored one, no changes, we can load the code
+            // Otherwise we have to download a new version
+            if (codeVersion != version)
+            {
+                // And update the reported twin
+                reported.Add("Message", "Updating...");
+                device.UpdateReportedProperties(reported);
+
+                string firmwareLocation = (string)desired["Firmware"];
+                Debug.WriteLine(firmwareLocation);
+
+                string fileName = firmwareLocation.Substring(firmwareLocation.LastIndexOf('/') + 1);
+
+                DownloadFirmware(firmwareLocation, fileName);
+
+                // RebootDevice();
+            }
+        }
+
+        private static void DownloadFirmware(string firmwareLocation, string fileName)
+        {
+            // Let's first clean all the pe files
+            // We keep any other file
+            files = Directory.GetFiles(RootPath);
+            foreach (var file in files)
+            {
+                if (file.EndsWith(".pe"))
+                {
+                    File.Delete(file);
+                }
+            }
+
+
+            //// If we are connected to Azure, we will disconnect as small devices only have limited memory
+            if (device != null && device.IsConnected)
+            {
+                device.Close();
+            }
+
+            //httpClient.DefaultRequestHeaders.Add("x-ms-blob-type", "BlockBlob");
+            // this example uses Tls 1.2 with Azure
+            httpClient.SslProtocols = System.Net.Security.SslProtocols.Tls12;
+            // use the pem certificate we created earlier
+            httpClient.HttpsAuthentCert = new X509Certificate(azurePEMCertBaltimore);
+
+            HttpResponseMessage response = httpClient.Get(firmwareLocation);
+            response.EnsureSuccessStatusCode();
+
+            using FileStream fs = new FileStream($"{RootPath}{fileName}", FileMode.Create, FileAccess.Write);
+            response.Content.ReadAsStream().CopyTo(fs);
+            fs.Flush();
+            fs.Close();
+            response.Dispose();
+        }
 
         // Azure Root CA certificate. This certificate might expire in JUNE 2022 
         private const string AzureRootCA = @"-----BEGIN CERTIFICATE-----
@@ -109,6 +181,27 @@ R9I4LtD+gdwyah617jzV/OeBHRnDJELqYzmp
 -----END CERTIFICATE-----
 ";
 
-
+        private const string azurePEMCertBaltimore = @"-----BEGIN CERTIFICATE-----
+MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBH
+MjAeFw0xMzA4MDExMjAwMDBaFw0zODAxMTUxMjAwMDBaMGExCzAJBgNVBAYTAlVT
+MRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5j
+b20xIDAeBgNVBAMTF0RpZ2lDZXJ0IEdsb2JhbCBSb290IEcyMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuzfNNNx7a8myaJCtSnX/RrohCgiN9RlUyfuI
+2/Ou8jqJkTx65qsGGmvPrC3oXgkkRLpimn7Wo6h+4FR1IAWsULecYxpsMNzaHxmx
+1x7e/dfgy5SDN67sH0NO3Xss0r0upS/kqbitOtSZpLYl6ZtrAGCSYP9PIUkY92eQ
+q2EGnI/yuum06ZIya7XzV+hdG82MHauVBJVJ8zUtluNJbd134/tJS7SsVQepj5Wz
+tCO7TG1F8PapspUwtP1MVYwnSlcUfIKdzXOS0xZKBgyMUNGPHgm+F6HmIcr9g+UQ
+vIOlCsRnKPZzFBQ9RnbDhxSJITRNrw9FDKZJobq7nMWxM4MphQIDAQABo0IwQDAP
+BgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBhjAdBgNVHQ4EFgQUTiJUIBiV
+5uNu5g/6+rkS7QYXjzkwDQYJKoZIhvcNAQELBQADggEBAGBnKJRvDkhj6zHd6mcY
+1Yl9PMWLSn/pvtsrF9+wX3N3KjITOYFnQoQj8kVnNeyIv/iPsGEMNKSuIEyExtv4
+NeF22d+mQrvHRAiGfzZ0JFrabA0UWTW98kndth/Jsw1HKj2ZL7tcu7XUIOGZX1NG
+Fdtom/DzMNU+MeKNhJ7jitralj41E6Vf8PlwUHBHQRFXGU7Aj64GxJUTFy8bJZ91
+8rGOmaFvE7FBcf6IKshPECBV1/MUReXgRPTqh5Uykw7+U0b6LJ3/iyK5S9kJRaTe
+pLiaWN0bfVKfjllDiIGknibVb63dDcY3fe0Dkhvld1927jyNxF1WW6LZZm6zNTfl
+MrY=
+-----END CERTIFICATE-----";
     }
 }
